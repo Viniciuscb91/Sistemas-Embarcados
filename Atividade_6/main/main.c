@@ -1,99 +1,90 @@
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "driver/gpio.h"
-#include "soc/gpio_reg.h"
+#include "esp_timer.h"
 
-#define LED_PIN    18   
-#define BUTTON_PIN 4 
+// Pinos
+#define BOTAO_GPIO 4
+#define LED_GPIO   18
 
-SemaphoreHandle_t btn_semaforo;
+// Filas e Timers
+static QueueHandle_t fila_eventos_botao = NULL;
+esp_timer_handle_t timer_10s;
+esp_timer_handle_t timer_2s;
 
-//função de interupção
-static void IRAM_ATTR ISR_extern(void* arg) {
-// semaforo
-    xSemaphoreGiveFromISR(btn_semaforo, NULL);
+static void timer_10s_callback(void* arg) {
+    gpio_set_level(LED_GPIO, 0); // Passaram 10s de inatividade. Desliga o LED.
+}
+
+static void timer_2s_callback(void* arg) {
+    gpio_set_level(LED_GPIO, 0); // O botão foi segurado por 2s. Desligamento forçado.
+    esp_timer_stop(timer_10s);  // Cancela o timer de 10s para ele não tentar apagar de novo à toa
+}
+
+static void IRAM_ATTR gpio_isr_handler(void* arg) {
+    uint32_t gpio_num = (uint32_t) arg;
+    xQueueSendFromISR(fila_eventos_botao, &gpio_num, NULL);  // Envia o número do pino para a fila e acorda a Task
+}
+
+static void task_controle_botao(void* arg) {
+    uint32_t io_num;
+
+    while(1) {
+        if(xQueueReceive(fila_eventos_botao, &io_num, portMAX_DELAY)) {
+            vTaskDelay(pdMS_TO_TICKS(50)); 
+            
+            int nivel = gpio_get_level(BOTAO_GPIO);
+            
+            xQueueReset(fila_eventos_botao); // Limpa a fila para ignorar os repiques elétricos que aconteceram nesses 50ms 
+
+            if(nivel == 0) { 
+                gpio_set_level(LED_GPIO, 1);
+                
+                esp_timer_stop(timer_10s); 
+                esp_timer_start_once(timer_10s, 10000000ULL); // 10.000.000 us = 10s
+                
+                esp_timer_stop(timer_2s);
+                esp_timer_start_once(timer_2s, 2000000ULL);   // 2.000.000 us = 2s
+            } 
+            else if (nivel == 1) { 
+                esp_timer_stop(timer_2s);
+            }
+        }
+    }
 }
 
 void app_main(void) {
-    gpio_config_t led_conf = {
-        .pin_bit_mask = (1ULL << LED_PIN),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&led_conf);
+    gpio_reset_pin(LED_GPIO);
+    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(LED_GPIO, 0);
 
-    gpio_config_t btn_conf = {
-        .pin_bit_mask = (1ULL << BUTTON_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE, 
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_NEGEDGE 
-    };
-    gpio_config(&btn_conf);
+    gpio_reset_pin(BOTAO_GPIO);
+    gpio_set_direction(BOTAO_GPIO, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(BOTAO_GPIO, GPIO_FLOATING); 
+    gpio_set_intr_type(BOTAO_GPIO, GPIO_INTR_ANYEDGE); // Configura a interrupção para Qualquer Borda (ANYEDGE) - Detecta apertar e soltar 
 
+    // Criação da Fila e da Task
+    fila_eventos_botao = xQueueCreate(10, sizeof(uint32_t));
+    xTaskCreate(task_controle_botao, "task_botao", 2048, NULL, 10, NULL);
+
+    // Instalação do Serviço de Interrupção
     gpio_install_isr_service(0);
-    gpio_isr_handler_add(BUTTON_PIN, ISR_extern, NULL);
+    gpio_isr_handler_add(BOTAO_GPIO, gpio_isr_handler, (void*) BOTAO_GPIO);
 
-    // gera o semáforo 
-    btn_semaforo = xSemaphoreCreateBinary();
+    // Criação dos Timers
+    const esp_timer_create_args_t timer_10s_args = {
+        .callback = &timer_10s_callback,
+        .name = "timer_10s"
+    };
+    esp_timer_create(&timer_10s_args, &timer_10s);
 
-    bool led_state = false;
-    TickType_t tempo_espera = portMAX_DELAY; 
+    const esp_timer_create_args_t timer_2s_args = {
+        .callback = &timer_2s_callback,
+        .name = "timer_2s"
+    };
+    esp_timer_create(&timer_2s_args, &timer_2s);
 
-    while (1) {
-
-        if (xSemaphoreTake(btn_semaforo, tempo_espera) == pdTRUE) {
-            //debounce
-            vTaskDelay(pdMS_TO_TICKS(50)); 
-            
-            if (gpio_get_level(BUTTON_PIN) == 0) { 
-                
-                // ler o valor da porta e colocar em uma var temporária
-                uint32_t var_temporaria = REG_READ(GPIO_OUT_REG);
-                
-                // máscara para o bit 
-                uint32_t mascara = (1 << LED_PIN);
-                
-                //operação bitwise entre a mascara e a var temporária
-                var_temporaria = var_temporaria | mascara;
-                
-                // salvar o valor da var temporária 
-                REG_WRITE(GPIO_OUT_REG, var_temporaria);
-                
-                led_state = true;
-                
-                TickType_t inicio_pressao = xTaskGetTickCount();
-                bool desligamento_forcado = false;
-
-                // monitora para ver se o botão continua precionado por 2 segundos
-                while (gpio_get_level(BUTTON_PIN) == 0) {
-                    if ((xTaskGetTickCount() - inicio_pressao) >= pdMS_TO_TICKS(2000)) {
-                        
-                        gpio_set_level(LED_PIN, 0);
-                        led_state = false;
-                        tempo_espera = portMAX_DELAY; 
-                        desligamento_forcado = true;
-                        
-                        while(gpio_get_level(BUTTON_PIN) == 0) {
-                            vTaskDelay(pdMS_TO_TICKS(20));
-                        }
-                        break; 
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(20));
-                }
-                
-                if (!desligamento_forcado) {
-                    tempo_espera = pdMS_TO_TICKS(10000); 
-                }
-            }
-        } 
-        else {
-            gpio_set_level(LED_PIN, 0);
-            led_state = false;
-            tempo_espera = portMAX_DELAY; 
-        }
-    }
+    printf("Sistema Iniciado - Aguardando Interrupcoes...\n");
 }
