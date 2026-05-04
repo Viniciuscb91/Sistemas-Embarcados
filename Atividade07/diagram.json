@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "author": "Lavoisier Chaves Ramos",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-s3-devkitc-1",
+      "id": "esp",
+      "top": -0.18,
+      "left": 4.57,
+      "attrs": { "builder": "esp-idf" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led1",
+      "top": 15.6,
+      "left": -63.4,
+      "attrs": { "color": "green", "flip": "" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": 128.2,
+      "left": -77.65,
+      "rotate": 270,
+      "attrs": { "value": "220" }
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "esp:17", "esp:18", "orange", [ "h-38.45", "v9.6", "h0" ] ],
+    [ "esp:GND.1", "r1:1", "black", [ "h0" ] ],
+    [ "esp:4", "led1:A", "red", [ "h0" ] ],
+    [ "led1:C", "r1:2", "red", [ "v0" ] ]
+  ],
+  "dependencies": {}
+}
